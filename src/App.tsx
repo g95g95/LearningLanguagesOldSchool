@@ -158,6 +158,10 @@ const App = () => {
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
 
   useEffect(() => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      return;
+    }
+
     const synth = window.speechSynthesis;
 
     const populateVoices = () => {
@@ -312,7 +316,15 @@ const App = () => {
       return;
     }
 
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      return;
+    }
+
     const synth = window.speechSynthesis;
+    if (!('SpeechSynthesisUtterance' in window)) {
+      return;
+    }
+
     synth.cancel();
 
     const preferredLanguages = learningLanguages.length ? learningLanguages : motherLanguage ? [motherLanguage] : [];
