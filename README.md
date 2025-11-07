@@ -9,7 +9,8 @@ Web app ultra-moderna per allenare il vocabolario con un flusso old school:
 - esercizi di traduzione con pronuncia tramite Web Speech API, gestione della traslitterazione e feedback immediato;
 - schermata finale con complimenti e raccolta di insight esportabili in JSON o TXT.
 
-Il progetto è pronto per essere pubblicato su GitHub Pages grazie al build statico generato da Vite.
+Il progetto è pronto per essere pubblicato su GitHub Pages: il workflow automatico si occupa di costruire il bundle e
+pubblicarlo sul branch `gh-pages` ad ogni push su `main`.
 
 ## Requisiti
 
@@ -40,16 +41,10 @@ I file pronti per il deploy saranno prodotti nella cartella `dist/`.
 
 ## Deploy su GitHub Pages
 
-1. Assicurati di aver configurato il repository GitHub.
-2. Esegui:
-
-   ```bash
-   npm run deploy
-   ```
-
-   Il comando esegue il build e pubblica la cartella `dist/` sul branch `gh-pages` tramite [`gh-pages`](https://github.com/tschaub/gh-pages).
-
-3. Attiva GitHub Pages dal repository (`Settings` → `Pages`) puntando al branch `gh-pages`.
+1. Vai su `Settings → Pages` e scegli l'opzione "GitHub Actions" come sorgente.
+2. Ogni push su `main` attiverà il workflow `.github/workflows/deploy.yml` che esegue `npm install`, `npm run build` e
+   pubblica la cartella `dist/` su GitHub Pages.
+3. Puoi forzare un deploy manuale eseguendo il workflow dalla sezione "Actions" con l'evento `workflow_dispatch`.
 
 ## Formato del dataset
 
