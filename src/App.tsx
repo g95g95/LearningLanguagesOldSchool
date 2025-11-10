@@ -1,242 +1,84 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import * as XLSX from 'xlsx';
+import { ChangeEvent, useCallback, useMemo, useRef, useState } from 'react';
+import {
+  languageByCode,
+  languageCatalogue,
+  transliterationCodes
+} from './data/languages';
+import { useSpeechVoices } from './utils/speech';
+import { formatDuration } from './utils/time';
+import { exportInsights } from './utils/export';
+import { readFile, readFromUrl } from './utils/xlsx';
+import type { LanguageCode, ScreenState, UserResponse, WordEntry } from './types';
 
-const languageCatalogue = [
-  { code: 'it', label: 'Italiano', flag: '🇮🇹', transliterationRequired: false, locale: 'it-IT' },
-  { code: 'en', label: 'English', flag: '🇬🇧', transliterationRequired: false, locale: 'en-US' },
-  { code: 'de', label: 'Deutsch', flag: '🇩🇪', transliterationRequired: false, locale: 'de-DE' },
-  { code: 'fr', label: 'Français', flag: '🇫🇷', transliterationRequired: false, locale: 'fr-FR' },
-  { code: 'es', label: 'Español', flag: '🇪🇸', transliterationRequired: false, locale: 'es-ES' },
-  { code: 'ru', label: 'Русский', flag: '🇷🇺', transliterationRequired: true, locale: 'ru-RU' },
-  { code: 'ja', label: '日本語', flag: '🇯🇵', transliterationRequired: true, locale: 'ja-JP' },
-  { code: 'zh', label: '中文', flag: '🇨🇳', transliterationRequired: true, locale: 'zh-CN' },
-  { code: 'ar', label: 'العربية', flag: '🇸🇦', transliterationRequired: true, locale: 'ar-SA' },
-  { code: 'he', label: 'עברית', flag: '🇮🇱', transliterationRequired: true, locale: 'he-IL' }
-] as const;
-
-type LanguageCode = (typeof languageCatalogue)[number]['code'];
-
-type ScreenState =
-  | 'intro'
-  | 'mother-language'
-  | 'dataset-upload'
-  | 'quiz'
-  | 'complete'
-  | 'insights';
-
-type WordEntry = {
-  unknown: string;
-  translation: string;
-  transliteration?: string;
-};
-
-type UserResponse = {
-  word: WordEntry;
-  userTranslation: string;
-  userTransliteration?: string;
-  isCorrect: boolean;
+type QuizState = {
+  currentIndex: number;
+  guess: string;
+  transliterationGuess: string;
+  feedback: string | null;
+  isAnswered: boolean;
   revealedTransliteration: boolean;
+  responses: UserResponse[];
 };
 
-const transliterationCodes: Set<LanguageCode> = new Set(
-  languageCatalogue.filter((lang) => lang.transliterationRequired).map((lang) => lang.code)
-);
-
-const languageByCode = Object.fromEntries(languageCatalogue.map((lang) => [lang.code, lang]));
-
-type ParsedRows = Array<Array<string | number>>;
-
-const detectHeaders = (rows: ParsedRows) => {
-  if (!rows.length) {
-    return { hasHeader: false } as const;
-  }
-
-  const [firstRow] = rows;
-  const normalized = firstRow.map((cell) => String(cell ?? '').toLowerCase());
-  const headerKeywords = ['parola', 'unknown', 'traduzione', 'translation', 'traslitterazione', 'transliteration'];
-  const hasHeader = normalized.some((cell) => headerKeywords.some((keyword) => cell.includes(keyword)));
-
-  if (!hasHeader) {
-    return { hasHeader: false } as const;
-  }
-
-  const locate = (aliases: string[]) =>
-    normalized.findIndex((cell) => aliases.some((alias) => cell.includes(alias)));
-
-  const unknownIndex = locate(['parola', 'unknown']);
-  const translationIndex = locate(['traduzione', 'translation']);
-  const transliterationIndex = locate(['traslitterazione', 'transliteration']);
-
-  return {
-    hasHeader: true,
-    indexes: {
-      unknown: unknownIndex >= 0 ? unknownIndex : 0,
-      translation: translationIndex >= 0 ? translationIndex : 1,
-      transliteration: transliterationIndex >= 0 ? transliterationIndex : 2
-    }
-  } as const;
-};
-
-const rowsToEntries = (rows: ParsedRows): WordEntry[] => {
-  if (!rows.length) {
-    return [];
-  }
-
-  const { hasHeader, indexes } = detectHeaders(rows);
-  const effectiveRows = hasHeader ? rows.slice(1) : rows;
-
-  return effectiveRows.reduce<WordEntry[]>((accumulator, row) => {
-    const unknownRaw = row[indexes?.unknown ?? 0];
-    const translationRaw = row[indexes?.translation ?? 1];
-    const transliterationRaw = row[indexes?.transliteration ?? 2];
-
-    const unknown = String(unknownRaw ?? '').trim();
-    const translation = String(translationRaw ?? '').trim();
-    const transliteration = transliterationRaw ? String(transliterationRaw ?? '').trim() : undefined;
-
-    if (!unknown || !translation) {
-      return accumulator;
-    }
-
-    accumulator.push({ unknown, translation, transliteration });
-    return accumulator;
-  }, []);
-};
-
-const readWorkbook = (workbook: XLSX.WorkBook): WordEntry[] => {
-  const [firstSheetName] = workbook.SheetNames;
-  if (!firstSheetName) {
-    return [];
-  }
-
-  const worksheet = workbook.Sheets[firstSheetName];
-  const rows = XLSX.utils.sheet_to_json(worksheet, {
-    header: 1,
-    blankrows: false,
-    defval: ''
-  }) as ParsedRows;
-
-  return rowsToEntries(rows);
-};
-
-const formatDuration = (milliseconds: number) => {
-  if (!Number.isFinite(milliseconds)) {
-    return '0s';
-  }
-
-  const seconds = Math.floor(milliseconds / 1000);
-  const mins = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-  const parts = [] as string[];
-
-  if (mins) {
-    parts.push(`${mins}m`);
-  }
-
-  parts.push(`${remainingSeconds}s`);
-  return parts.join(' ');
-};
+const createEmptyQuizState = (): QuizState => ({
+  currentIndex: 0,
+  guess: '',
+  transliterationGuess: '',
+  feedback: null,
+  isAnswered: false,
+  revealedTransliteration: false,
+  responses: []
+});
 
 const App = () => {
   const [screen, setScreen] = useState<ScreenState>('intro');
   const [motherLanguage, setMotherLanguage] = useState<LanguageCode | null>(null);
   const [learningLanguages, setLearningLanguages] = useState<LanguageCode[]>([]);
   const [entries, setEntries] = useState<WordEntry[]>([]);
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [guess, setGuess] = useState('');
-  const [transliterationGuess, setTransliterationGuess] = useState('');
-  const [feedback, setFeedback] = useState<string | null>(null);
-  const [revealedTransliteration, setRevealedTransliteration] = useState(false);
-  const [responses, setResponses] = useState<UserResponse[]>([]);
-  const [isAnswered, setIsAnswered] = useState(false);
+  const [quizState, setQuizState] = useState<QuizState>(() => createEmptyQuizState());
   const [googleSheetUrl, setGoogleSheetUrl] = useState('');
   const [isLoadingSheet, setIsLoadingSheet] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+
   const startTimestampRef = useRef<number | null>(null);
   const endTimestampRef = useRef<number | null>(null);
-  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const voices = useSpeechVoices();
 
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      return;
-    }
-
-    const synth = window.speechSynthesis;
-
-    const populateVoices = () => {
-      setVoices(synth.getVoices());
-    };
-
-    populateVoices();
-
-    if (typeof synth.addEventListener === 'function' && typeof synth.removeEventListener === 'function') {
-      synth.addEventListener('voiceschanged', populateVoices);
-
-      return () => {
-        synth.removeEventListener('voiceschanged', populateVoices);
-      };
-    }
-
-    if ('onvoiceschanged' in synth) {
-      const speech = synth as SpeechSynthesis & {
-        onvoiceschanged: ((this: SpeechSynthesis, ev: Event) => any) | null;
-      };
-      const handler = () => populateVoices();
-      speech.onvoiceschanged = handler;
-
-      return () => {
-        if (speech.onvoiceschanged === handler) {
-          speech.onvoiceschanged = null;
-        }
-      };
-    }
-
-    return undefined;
-  }, []);
-
-  const resetQuizState = () => {
-    setCurrentIndex(0);
-    setGuess('');
-    setTransliterationGuess('');
-    setFeedback(null);
-    setResponses([]);
-    setIsAnswered(false);
-    setRevealedTransliteration(false);
+  const resetQuiz = useCallback(() => {
+    setQuizState(createEmptyQuizState());
     startTimestampRef.current = null;
     endTimestampRef.current = null;
-  };
+  }, []);
 
-  const handleFile = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const data = event.target?.result;
-      if (!data) {
-        setLoadError('Impossibile leggere il file caricato.');
+  const handleFileUpload = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) {
         return;
       }
 
-      let workbook: XLSX.WorkBook;
       try {
-        workbook = XLSX.read(data, { type: 'array' });
+        const parsedEntries = await readFile(file);
+        if (!parsedEntries.length) {
+          setLoadError('Il file non contiene vocaboli validi.');
+          return;
+        }
+
+        setEntries(parsedEntries);
+        setFileName(file.name);
+        setLoadError(null);
       } catch (error) {
+        console.error(error);
         setLoadError('Formato file non supportato o file corrotto.');
-        return;
+      } finally {
+        event.target.value = '';
       }
+    },
+    []
+  );
 
-      const parsedEntries = readWorkbook(workbook);
-      if (!parsedEntries.length) {
-        setLoadError('Il file non contiene vocaboli validi.');
-        return;
-      }
-
-      setEntries(parsedEntries);
-      setLoadError(null);
-    };
-
-    reader.readAsArrayBuffer(file);
-  };
-
-  const handleGoogleSheetImport = async () => {
+  const handleGoogleSheetImport = useCallback(async () => {
     if (!googleSheetUrl) {
       return;
     }
@@ -244,110 +86,63 @@ const App = () => {
     try {
       setIsLoadingSheet(true);
       setLoadError(null);
-      const response = await fetch(googleSheetUrl);
-      if (!response.ok) {
-        throw new Error('Risposta non valida dal foglio Google.');
-      }
-
-      const contentType = response.headers.get('content-type');
-      const isCsv = contentType?.includes('text/csv') || googleSheetUrl.includes('format=csv');
-      const buffer = isCsv ? await response.text() : await response.arrayBuffer();
-
-      const workbook = isCsv
-        ? XLSX.read(buffer, { type: 'string' })
-        : XLSX.read(buffer, { type: 'array' });
-
-      const parsedEntries = readWorkbook(workbook);
+      const parsedEntries = await readFromUrl(googleSheetUrl);
       if (!parsedEntries.length) {
         throw new Error('Il foglio non contiene vocaboli validi.');
       }
 
       setEntries(parsedEntries);
+      setFileName('Google Sheet');
     } catch (error) {
+      console.error(error);
       setLoadError((error as Error).message);
     } finally {
       setIsLoadingSheet(false);
     }
-  };
+  }, [googleSheetUrl]);
 
-  const handleConfirm = () => {
-    const currentWord = entries[currentIndex];
-    if (!currentWord || isAnswered) {
+  const startQuiz = useCallback(() => {
+    if (!entries.length || !learningLanguages.length) {
+      setLoadError('Seleziona almeno una lingua e carica un dataset.');
       return;
     }
 
-    const normalizedGuess = guess.trim().toLowerCase();
-    const normalizedTranslation = currentWord.translation.trim().toLowerCase();
-    const isCorrect = normalizedGuess === normalizedTranslation;
-
-    setResponses((previous) => [
-      ...previous,
-      {
-        word: currentWord,
-        userTranslation: guess,
-        userTransliteration: transliterationGuess || undefined,
-        isCorrect,
-        revealedTransliteration
-      }
-    ]);
-
-    setFeedback(isCorrect ? 'Bravo, parola esatta' : 'risposta sbagliata');
-    setIsAnswered(true);
-
-    if (currentIndex === entries.length - 1) {
-      endTimestampRef.current = Date.now();
-    }
-  };
-
-  const handleNext = () => {
-    if (!isAnswered) {
-      return;
-    }
-
-    if (currentIndex >= entries.length - 1) {
-      setScreen('complete');
-      return;
-    }
-
-    setCurrentIndex((prev) => prev + 1);
-    setGuess('');
-    setTransliterationGuess('');
-    setFeedback(null);
-    setIsAnswered(false);
-    setRevealedTransliteration(false);
-  };
-
-  const startQuiz = () => {
-    if (!entries.length) {
-      setLoadError('Carica prima un dataset di vocaboli.');
-      return;
-    }
-
-    resetQuizState();
+    resetQuiz();
     setScreen('quiz');
     startTimestampRef.current = Date.now();
-  };
+  }, [entries.length, learningLanguages.length, resetQuiz]);
 
-  const speakWord = () => {
-    const word = entries[currentIndex]?.unknown;
+  const currentWord = entries[quizState.currentIndex];
+  const requiresTransliteration = useMemo(
+    () =>
+      Boolean(currentWord?.transliteration) ||
+      learningLanguages.some((code) => transliterationCodes.has(code)),
+    [currentWord?.transliteration, learningLanguages]
+  );
+
+  const speakWord = useCallback(() => {
+    const word = currentWord?.unknown;
     if (!word) {
       return;
     }
 
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) {
       return;
     }
 
     const synth = window.speechSynthesis;
-    if (!('SpeechSynthesisUtterance' in window)) {
-      return;
-    }
-
     synth.cancel();
 
-    const preferredLanguages = learningLanguages.length ? learningLanguages : motherLanguage ? [motherLanguage] : [];
+    const preferredLanguages = learningLanguages.length
+      ? learningLanguages
+      : motherLanguage
+        ? [motherLanguage]
+        : [];
+
     const voice = voices.find((candidate) =>
-      preferredLanguages.some((code) => candidate.lang.toLowerCase().startsWith(languageByCode[code].locale.split('-')[0]))
+      preferredLanguages.some((code) =>
+        candidate.lang.toLowerCase().startsWith(languageByCode[code].locale.split('-')[0])
+      )
     );
 
     const utterance = new SpeechSynthesisUtterance(word);
@@ -358,21 +153,72 @@ const App = () => {
     }
 
     synth.speak(utterance);
-  };
+  }, [currentWord?.unknown, learningLanguages, motherLanguage, voices]);
+
+  const handleConfirm = useCallback(() => {
+    const word = entries[quizState.currentIndex];
+    if (!word || quizState.isAnswered) {
+      return;
+    }
+
+    const normalizedGuess = quizState.guess.trim().toLowerCase();
+    const normalizedTranslation = word.translation.trim().toLowerCase();
+    const isCorrect = normalizedGuess === normalizedTranslation;
+
+    setQuizState((previous) => ({
+      ...previous,
+      isAnswered: true,
+      feedback: isCorrect ? 'Bravo, parola esatta' : 'Risposta sbagliata',
+      responses: [
+        ...previous.responses,
+        {
+          word,
+          userTranslation: previous.guess,
+          userTransliteration: previous.revealedTransliteration ? undefined : previous.transliterationGuess || undefined,
+          isCorrect,
+          revealedTransliteration: previous.revealedTransliteration
+        }
+      ]
+    }));
+
+    if (quizState.currentIndex === entries.length - 1) {
+      endTimestampRef.current = Date.now();
+    }
+  }, [entries, quizState]);
+
+  const handleNext = useCallback(() => {
+    if (!quizState.isAnswered) {
+      return;
+    }
+
+    if (quizState.currentIndex >= entries.length - 1) {
+      setScreen('complete');
+      return;
+    }
+
+    setQuizState((previous) => ({
+      ...previous,
+      currentIndex: previous.currentIndex + 1,
+      guess: '',
+      transliterationGuess: '',
+      feedback: null,
+      isAnswered: false,
+      revealedTransliteration: false
+    }));
+  }, [entries.length, quizState.isAnswered, quizState.currentIndex]);
 
   const accuracy = useMemo(() => {
-    if (!responses.length) {
+    if (!quizState.responses.length) {
       return 0;
     }
 
-    const correctAnswers = responses.filter((response) => response.isCorrect).length;
-    return Math.round((correctAnswers / responses.length) * 100);
-  }, [responses]);
+    const correctAnswers = quizState.responses.filter((response) => response.isCorrect).length;
+    return Math.round((correctAnswers / quizState.responses.length) * 100);
+  }, [quizState.responses]);
 
   const mistakes = useMemo(
-    () =>
-      responses.filter((response) => !response.isCorrect).map((response) => response.word.unknown),
-    [responses]
+    () => quizState.responses.filter((response) => !response.isCorrect).map((response) => response.word.unknown),
+    [quizState.responses]
   );
 
   const quizDuration = useMemo(() => {
@@ -382,10 +228,6 @@ const App = () => {
 
     return endTimestampRef.current - startTimestampRef.current;
   }, [screen]);
-
-  const currentWord = entries[currentIndex];
-  const requiresTransliteration =
-    Boolean(currentWord?.transliteration) || learningLanguages.some((code) => transliterationCodes.has(code));
 
   const canStartQuiz = entries.length > 0 && learningLanguages.length > 0;
 
@@ -403,11 +245,10 @@ const App = () => {
           <h2 className="text-2xl font-semibold text-sky-200">Come funziona?</h2>
           <p className="text-base leading-relaxed text-slate-300">
             Carica il tuo vocabolario personale e trasforma l&apos;esercizio in un gioco immersivo. Scegli la tua lingua madre,
-            seleziona le lingue che vuoi imparare, ascolta la pronuncia, annota la traslitterazione quando serve e osserva gli
-            insight finali.
+            seleziona le lingue che vuoi imparare, ascolta la pronuncia e osserva gli insight finali.
           </p>
           <button
-            onClick={() => setScreen('mother-language')}
+            onClick={() => setScreen('setup')}
             className="mt-4 rounded-full bg-gradient-to-r from-sky-500 to-cyan-400 px-6 py-3 text-lg font-semibold text-slate-950 shadow-lg transition hover:from-sky-400 hover:to-cyan-300"
           >
             Inizia adesso
@@ -415,134 +256,104 @@ const App = () => {
         </section>
       )}
 
-      {screen === 'mother-language' && (
+      {screen === 'setup' && (
         <section className="flex flex-1 flex-col gap-6 rounded-3xl border border-slate-800 bg-slate-900/70 p-8">
-          <h2 className="text-2xl font-semibold text-sky-200">Choose your mother language</h2>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {languageCatalogue.map((language) => {
-              const isActive = motherLanguage === language.code;
-              return (
-                <button
-                  key={language.code}
-                  type="button"
-                  onClick={() => setMotherLanguage(language.code)}
-                  className={`flex items-center gap-4 rounded-2xl border px-4 py-3 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${
-                    isActive ? 'border-sky-400 bg-sky-400/10 shadow-lg' : 'border-slate-800 bg-slate-950/40 hover:border-slate-600'
-                  }`}
-                >
-                  <span className="text-3xl" aria-hidden>
-                    {language.flag}
-                  </span>
-                  <span className="text-lg font-medium text-slate-100">{language.label}</span>
-                </button>
-              );
-            })}
-          </div>
-          <div className="flex items-center justify-between">
-            <button
-              onClick={() => setScreen('intro')}
-              className="rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
-            >
-              Indietro
-            </button>
-            <button
-              disabled={!motherLanguage}
-              onClick={() => setScreen('dataset-upload')}
-              className="rounded-full bg-gradient-to-r from-sky-500 to-cyan-400 px-5 py-2 text-sm font-semibold text-slate-950 shadow-md transition enabled:hover:from-sky-400 enabled:hover:to-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Continua
-            </button>
-          </div>
-        </section>
-      )}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <div className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-6">
+              <h3 className="text-lg font-semibold text-sky-200">Lingua madre</h3>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {languageCatalogue.map((language) => {
+                  const isActive = motherLanguage === language.code;
+                  return (
+                    <button
+                      key={language.code}
+                      type="button"
+                      onClick={() => setMotherLanguage(language.code)}
+                      className={`flex items-center gap-4 rounded-2xl border px-4 py-3 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${
+                        isActive ? 'border-sky-400 bg-sky-400/10 shadow-lg' : 'border-slate-800 bg-slate-950/40 hover:border-slate-600'
+                      }`}
+                    >
+                      <span className="text-3xl" aria-hidden>
+                        {language.flag}
+                      </span>
+                      <span className="text-lg font-medium text-slate-100">{language.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
-      {screen === 'dataset-upload' && (
-        <section className="flex flex-1 flex-col gap-8 rounded-3xl border border-slate-800 bg-slate-900/70 p-8">
-          <div className="flex flex-col gap-3">
-            <h2 className="text-2xl font-semibold text-sky-200">Prepara il tuo dataset personale</h2>
-            <p className="text-sm leading-relaxed text-slate-300">
-              Carica un file con tre colonne: parola sconosciuta, traduzione e (opzionale) traslitterazione per alfabeti non
-              latini. Accettiamo Excel, CSV o un link Google Sheets (usa l&apos;URL di esportazione in CSV).
-            </p>
+            <div className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-6">
+              <h3 className="text-lg font-semibold text-sky-200">Lingue da allenare</h3>
+              <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Seleziona anche più lingue</p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {languageCatalogue.map((language) => {
+                  const isChecked = learningLanguages.includes(language.code);
+                  return (
+                    <label
+                      key={language.code}
+                      className={`flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 transition ${
+                        isChecked ? 'border-emerald-400 bg-emerald-400/10 shadow-lg' : 'border-slate-800 bg-slate-950/40 hover:border-slate-600'
+                      }`}
+                    >
+                      <span className="flex items-center gap-3 text-slate-100">
+                        <span aria-hidden className="text-xl">
+                          {language.flag}
+                        </span>
+                        {language.label}
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={(event) => {
+                          setLearningLanguages((previous) => {
+                            if (event.target.checked) {
+                              return [...new Set([...previous, language.code])];
+                            }
+                            return previous.filter((code) => code !== language.code);
+                          });
+                        }}
+                        className="h-4 w-4 rounded border-slate-600 text-emerald-400 focus:ring-emerald-500"
+                      />
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <div className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-950/50 p-6">
-              <label className="text-sm font-semibold uppercase tracking-wide text-slate-400">
-                Upload da file
-                <input
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) {
-                      handleFile(file);
-                    }
-                  }}
-                  className="mt-3 block w-full cursor-pointer rounded-xl border border-dashed border-slate-700 bg-slate-900/60 p-4 text-sm text-slate-200 focus:outline-none"
-                />
+            <div className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-6">
+              <h3 className="text-lg font-semibold text-sky-200">Carica un file</h3>
+              <p className="text-sm text-slate-400">Supporto per XLSX, ODS, CSV: è sufficiente avere colonne per parola, traduzione e traslitterazione.</p>
+              <label className="flex cursor-pointer flex-col items-center gap-3 rounded-2xl border border-dashed border-slate-700 bg-slate-900/60 p-6 text-center transition hover:border-sky-400">
+                <span className="text-4xl" aria-hidden>
+                  📂
+                </span>
+                <span className="text-sm text-slate-200">Trascina o seleziona un file</span>
+                <input type="file" accept=".xlsx,.xls,.csv,.ods" className="hidden" onChange={handleFileUpload} />
               </label>
-              {entries.length > 0 && (
-                <p className="text-xs text-emerald-400">{entries.length} vocaboli pronti all&apos;uso.</p>
-              )}
+              {fileName && <p className="text-xs text-slate-500">Ultimo file caricato: {fileName}</p>}
             </div>
 
-            <div className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-950/50 p-6">
-              <label className="text-sm font-semibold uppercase tracking-wide text-slate-400">
-                Oppure importa da Google Sheets
+            <div className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-6">
+              <h3 className="text-lg font-semibold text-sky-200">Oppure incolla un Google Sheet</h3>
+              <div className="flex flex-col gap-3">
                 <input
                   type="url"
-                  placeholder="https://docs.google.com/spreadsheets/d/.../export?format=csv"
                   value={googleSheetUrl}
                   onChange={(event) => setGoogleSheetUrl(event.target.value)}
-                  className="mt-3 w-full rounded-xl border border-slate-700 bg-slate-900/60 p-3 text-sm text-slate-200 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none"
+                  placeholder="URL pubblico del foglio (consigliato formato CSV)"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-900/60 p-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none"
                 />
-              </label>
-              <button
-                type="button"
-                onClick={handleGoogleSheetImport}
-                disabled={!googleSheetUrl || isLoadingSheet}
-                className="w-fit rounded-full bg-gradient-to-r from-sky-500 to-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 shadow-md transition enabled:hover:from-sky-400 enabled:hover:to-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isLoadingSheet ? 'Importazione in corso…' : 'Importa'}
-              </button>
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-950/50 p-6">
-            <h3 className="text-lg font-semibold text-sky-200">Scegli le lingue che vuoi imparare</h3>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
-              {languageCatalogue.map((language) => {
-                const isChecked = learningLanguages.includes(language.code);
-                return (
-                  <label
-                    key={language.code}
-                    className={`flex items-center gap-3 rounded-2xl border px-3 py-2 text-sm transition ${
-                      isChecked ? 'border-sky-400 bg-sky-400/10' : 'border-slate-800 bg-transparent hover:border-slate-600'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isChecked}
-                      onChange={(event) => {
-                        setLearningLanguages((previous) => {
-                          if (event.target.checked) {
-                            return [...new Set([...previous, language.code])];
-                          }
-                          return previous.filter((code) => code !== language.code);
-                        });
-                      }}
-                      className="h-4 w-4 rounded border-slate-600 text-sky-400 focus:ring-sky-500"
-                    />
-                    <span className="flex items-center gap-2">
-                      <span aria-hidden className="text-xl">
-                        {language.flag}
-                      </span>
-                      <span>{language.label}</span>
-                    </span>
-                  </label>
-                );
-              })}
+                <button
+                  onClick={handleGoogleSheetImport}
+                  disabled={!googleSheetUrl || isLoadingSheet}
+                  className="self-start rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-400 px-5 py-2 text-sm font-semibold text-slate-950 shadow-md transition enabled:hover:from-violet-400 enabled:hover:to-fuchsia-300 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isLoadingSheet ? 'Caricamento...' : 'Importa'}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -550,7 +361,10 @@ const App = () => {
 
           <div className="flex items-center justify-between">
             <button
-              onClick={() => setScreen('mother-language')}
+              onClick={() => {
+                setScreen('intro');
+                resetQuiz();
+              }}
               className="rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
             >
               Indietro
@@ -570,7 +384,7 @@ const App = () => {
         <section className="flex flex-1 flex-col gap-6 rounded-3xl border border-slate-800 bg-slate-900/70 p-8">
           <div className="flex flex-col gap-2">
             <h2 className="text-2xl font-semibold text-sky-200">Sessione attiva</h2>
-            <p className="text-xs uppercase tracking-[0.4em] text-slate-500">Parola {currentIndex + 1}</p>
+            <p className="text-xs uppercase tracking-[0.4em] text-slate-500">Parola {quizState.currentIndex + 1}</p>
           </div>
 
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
@@ -593,9 +407,9 @@ const App = () => {
                 <span className="font-semibold uppercase tracking-wide text-slate-400">La tua guess</span>
                 <input
                   type="text"
-                  value={guess}
-                  onChange={(event) => setGuess(event.target.value)}
-                  disabled={isAnswered}
+                  value={quizState.guess}
+                  onChange={(event) => setQuizState((previous) => ({ ...previous, guess: event.target.value }))}
+                  disabled={quizState.isAnswered}
                   placeholder="Scrivi la traduzione..."
                   className="w-full rounded-xl border border-slate-700 bg-slate-900/60 p-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
                 />
@@ -607,9 +421,11 @@ const App = () => {
                     <span className="font-semibold uppercase tracking-wide text-slate-400">Traslitterazione</span>
                     <input
                       type="text"
-                      value={revealedTransliteration ? currentWord.transliteration ?? '' : transliterationGuess}
-                      onChange={(event) => setTransliterationGuess(event.target.value)}
-                      disabled={revealedTransliteration || isAnswered}
+                      value={quizState.revealedTransliteration ? currentWord.transliteration ?? '' : quizState.transliterationGuess}
+                      onChange={(event) =>
+                        setQuizState((previous) => ({ ...previous, transliterationGuess: event.target.value }))
+                      }
+                      disabled={quizState.revealedTransliteration || quizState.isAnswered}
                       placeholder="Annota la traslitterazione..."
                       className="w-full rounded-xl border border-slate-700 bg-slate-900/60 p-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
                     />
@@ -617,7 +433,7 @@ const App = () => {
                   {currentWord.transliteration && (
                     <button
                       type="button"
-                      onClick={() => setRevealedTransliteration(true)}
+                      onClick={() => setQuizState((previous) => ({ ...previous, revealedTransliteration: true }))}
                       className="self-start rounded-full border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-amber-200 transition hover:border-amber-300 hover:bg-amber-400/20"
                     >
                       Mostra traslitterazione
@@ -629,27 +445,27 @@ const App = () => {
               <div className="mt-2 flex items-center gap-3">
                 <button
                   onClick={handleConfirm}
-                  disabled={isAnswered || !guess.trim()}
+                  disabled={quizState.isAnswered || !quizState.guess.trim()}
                   className="rounded-full bg-gradient-to-r from-emerald-500 to-lime-400 px-5 py-2 text-sm font-semibold text-slate-950 shadow-md transition enabled:hover:from-emerald-400 enabled:hover:to-lime-300 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Conferma
                 </button>
                 <button
                   onClick={handleNext}
-                  disabled={!isAnswered}
+                  disabled={!quizState.isAnswered}
                   className="rounded-full border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition enabled:hover:border-slate-500 enabled:hover:text-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Avanti
                 </button>
               </div>
 
-              {feedback && (
+              {quizState.feedback && (
                 <div className="rounded-2xl border border-slate-700 bg-slate-900/80 p-4 text-sm text-slate-200">
-                  <p className="font-semibold">{feedback}</p>
-                  {!feedback.includes('Bravo') && (
+                  <p className="font-semibold">{quizState.feedback}</p>
+                  {!quizState.feedback.includes('Bravo') && (
                     <p className="mt-1 text-slate-400">Traduzione corretta: {currentWord.translation}</p>
                   )}
-                  {revealedTransliteration && currentWord.transliteration && (
+                  {quizState.revealedTransliteration && currentWord.transliteration && (
                     <p className="mt-1 text-slate-400">Traslitterazione: {currentWord.transliteration}</p>
                   )}
                 </div>
@@ -711,34 +527,39 @@ const App = () => {
 
           <div className="flex flex-wrap items-center gap-4">
             <button
-              onClick={() => exportInsights('json', {
-                motherLanguage,
-                learningLanguages,
-                entries,
-                responses,
-                quizDuration,
-                accuracy
-              })}
+              onClick={() =>
+                exportInsights('json', {
+                  motherLanguage,
+                  learningLanguages,
+                  entries,
+                  responses: quizState.responses,
+                  quizDuration,
+                  accuracy
+                })
+              }
               className="rounded-full border border-sky-500/40 bg-sky-500/10 px-4 py-2 text-sm font-semibold text-sky-200 transition hover:border-sky-400 hover:bg-sky-500/20"
             >
               Esporta in JSON
             </button>
             <button
-              onClick={() => exportInsights('txt', {
-                motherLanguage,
-                learningLanguages,
-                entries,
-                responses,
-                quizDuration,
-                accuracy
-              })}
+              onClick={() =>
+                exportInsights('txt', {
+                  motherLanguage,
+                  learningLanguages,
+                  entries,
+                  responses: quizState.responses,
+                  quizDuration,
+                  accuracy
+                })
+              }
               className="rounded-full border border-slate-600 px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-slate-400 hover:text-slate-50"
             >
               Esporta in TXT
             </button>
             <button
               onClick={() => {
-                setScreen('dataset-upload');
+                setScreen('setup');
+                resetQuiz();
               }}
               className="ml-auto rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
             >
@@ -749,69 +570,6 @@ const App = () => {
       )}
     </div>
   );
-};
-
-type ExportPayload = {
-  motherLanguage: LanguageCode | null;
-  learningLanguages: LanguageCode[];
-  entries: WordEntry[];
-  responses: UserResponse[];
-  quizDuration: number;
-  accuracy: number;
-};
-
-const exportInsights = (format: 'json' | 'txt', payload: ExportPayload) => {
-  const languageLabel = (code: LanguageCode | null) => (code ? languageByCode[code].label : 'N/A');
-  const stats = {
-    motherLanguage: languageLabel(payload.motherLanguage),
-    learningLanguages: payload.learningLanguages.map((code) => languageByCode[code].label),
-    totalWords: payload.entries.length,
-    accuracy: `${payload.accuracy}%`,
-    duration: formatDuration(payload.quizDuration),
-    mistakes: payload.responses.filter((response) => !response.isCorrect).map((response) => ({
-      word: response.word.unknown,
-      translation: response.word.translation
-    }))
-  };
-
-  let content: string;
-  let mimeType: string;
-  let extension: string;
-
-  if (format === 'json') {
-    content = JSON.stringify(stats, null, 2);
-    mimeType = 'application/json';
-    extension = 'json';
-  } else {
-    const lines = [
-      `Lingua madre: ${stats.motherLanguage}`,
-      `Lingue studiate: ${stats.learningLanguages.join(', ') || 'Nessuna'}`,
-      `Vocaboli totali: ${stats.totalWords}`,
-      `Accuratezza: ${stats.accuracy}`,
-      `Durata: ${stats.duration}`,
-      'Parole da ripassare:'
-    ];
-
-    if (stats.mistakes.length) {
-      stats.mistakes.forEach((mistake, index) => {
-        lines.push(`${index + 1}. ${mistake.word} → ${mistake.translation}`);
-      });
-    } else {
-      lines.push('Nessuna! Performance impeccabile.');
-    }
-
-    content = lines.join('\n');
-    mimeType = 'text/plain';
-    extension = 'txt';
-  }
-
-  const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `insights.${extension}`;
-  anchor.click();
-  URL.revokeObjectURL(url);
 };
 
 export default App;
