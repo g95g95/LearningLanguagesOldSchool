@@ -168,11 +168,30 @@ const App = () => {
     };
 
     populateVoices();
-    synth.addEventListener('voiceschanged', populateVoices);
 
-    return () => {
-      synth.removeEventListener('voiceschanged', populateVoices);
-    };
+    if (typeof synth.addEventListener === 'function' && typeof synth.removeEventListener === 'function') {
+      synth.addEventListener('voiceschanged', populateVoices);
+
+      return () => {
+        synth.removeEventListener('voiceschanged', populateVoices);
+      };
+    }
+
+    if ('onvoiceschanged' in synth) {
+      const speech = synth as SpeechSynthesis & {
+        onvoiceschanged: ((this: SpeechSynthesis, ev: Event) => any) | null;
+      };
+      const handler = () => populateVoices();
+      speech.onvoiceschanged = handler;
+
+      return () => {
+        if (speech.onvoiceschanged === handler) {
+          speech.onvoiceschanged = null;
+        }
+      };
+    }
+
+    return undefined;
   }, []);
 
   const resetQuizState = () => {
