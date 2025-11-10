@@ -38,7 +38,7 @@ type UserResponse = {
   revealedTransliteration: boolean;
 };
 
-const transliterationCodes = new Set(
+const transliterationCodes: Set<LanguageCode> = new Set(
   languageCatalogue.filter((lang) => lang.transliterationRequired).map((lang) => lang.code)
 );
 
@@ -85,23 +85,22 @@ const rowsToEntries = (rows: ParsedRows): WordEntry[] => {
   const { hasHeader, indexes } = detectHeaders(rows);
   const effectiveRows = hasHeader ? rows.slice(1) : rows;
 
-  return effectiveRows
-    .map((row) => {
-      const unknownRaw = row[indexes?.unknown ?? 0];
-      const translationRaw = row[indexes?.translation ?? 1];
-      const transliterationRaw = row[indexes?.transliteration ?? 2];
+  return effectiveRows.reduce<WordEntry[]>((accumulator, row) => {
+    const unknownRaw = row[indexes?.unknown ?? 0];
+    const translationRaw = row[indexes?.translation ?? 1];
+    const transliterationRaw = row[indexes?.transliteration ?? 2];
 
-      const unknown = String(unknownRaw ?? '').trim();
-      const translation = String(translationRaw ?? '').trim();
-      const transliteration = transliterationRaw ? String(transliterationRaw ?? '').trim() : undefined;
+    const unknown = String(unknownRaw ?? '').trim();
+    const translation = String(translationRaw ?? '').trim();
+    const transliteration = transliterationRaw ? String(transliterationRaw ?? '').trim() : undefined;
 
-      if (!unknown || !translation) {
-        return undefined;
-      }
+    if (!unknown || !translation) {
+      return accumulator;
+    }
 
-      return { unknown, translation, transliteration } satisfies WordEntry;
-    })
-    .filter((entry): entry is WordEntry => Boolean(entry));
+    accumulator.push({ unknown, translation, transliteration });
+    return accumulator;
+  }, []);
 };
 
 const readWorkbook = (workbook: XLSX.WorkBook): WordEntry[] => {
