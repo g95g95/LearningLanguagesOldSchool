@@ -17,6 +17,7 @@ type QuizState = {
   feedback: string | null;
   isAnswered: boolean;
   revealedTransliteration: boolean;
+  additionalMeanings: string[];
   responses: UserResponse[];
 };
 
@@ -27,8 +28,22 @@ const createEmptyQuizState = (): QuizState => ({
   feedback: null,
   isAnswered: false,
   revealedTransliteration: false,
+  additionalMeanings: [],
   responses: []
 });
+
+const normalizeForComparison = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '');
+
+const splitTranslations = (translation: string): string[] =>
+  translation
+    .split(/\s*\/\s*/)
+    .map((option) => option.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
 
 const App = () => {
   const [screen, setScreen] = useState<ScreenState>('intro');
@@ -161,14 +176,20 @@ const App = () => {
       return;
     }
 
-    const normalizedGuess = quizState.guess.trim().toLowerCase();
-    const normalizedTranslation = word.translation.trim().toLowerCase();
-    const isCorrect = normalizedGuess === normalizedTranslation;
+    const translationOptions = splitTranslations(word.translation);
+    const normalizedGuess = normalizeForComparison(quizState.guess);
+    const normalizedTranslations = translationOptions.map((option) => normalizeForComparison(option));
+    const matchIndex = normalizedTranslations.findIndex((option) => option === normalizedGuess);
+    const isCorrect = matchIndex !== -1;
+    const additionalMeanings = isCorrect
+      ? translationOptions.filter((option, index) => normalizedTranslations[index] !== normalizedGuess)
+      : [];
 
     setQuizState((previous) => ({
       ...previous,
       isAnswered: true,
       feedback: isCorrect ? 'Bravo, parola esatta' : 'Risposta sbagliata',
+      additionalMeanings,
       responses: [
         ...previous.responses,
         {
@@ -203,7 +224,8 @@ const App = () => {
       transliterationGuess: '',
       feedback: null,
       isAnswered: false,
-      revealedTransliteration: false
+      revealedTransliteration: false,
+      additionalMeanings: []
     }));
   }, [entries.length, quizState.isAnswered, quizState.currentIndex]);
 
@@ -409,6 +431,14 @@ const App = () => {
                   type="text"
                   value={quizState.guess}
                   onChange={(event) => setQuizState((previous) => ({ ...previous, guess: event.target.value }))}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      if (!quizState.isAnswered && quizState.guess.trim()) {
+                        handleConfirm();
+                      }
+                    }
+                  }}
                   disabled={quizState.isAnswered}
                   placeholder="Scrivi la traduzione..."
                   className="w-full rounded-xl border border-slate-700 bg-slate-900/60 p-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-sky-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
@@ -464,6 +494,11 @@ const App = () => {
                   <p className="font-semibold">{quizState.feedback}</p>
                   {!quizState.feedback.includes('Bravo') && (
                     <p className="mt-1 text-slate-400">Traduzione corretta: {currentWord.translation}</p>
+                  )}
+                  {quizState.feedback.includes('Bravo') && quizState.additionalMeanings.length > 0 && (
+                    <p className="mt-1 text-slate-400">
+                      Può significare anche: {quizState.additionalMeanings.join(', ')}
+                    </p>
                   )}
                   {quizState.revealedTransliteration && currentWord.transliteration && (
                     <p className="mt-1 text-slate-400">Traslitterazione: {currentWord.transliteration}</p>
