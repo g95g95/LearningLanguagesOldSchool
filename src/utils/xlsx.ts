@@ -14,10 +14,48 @@ type HeaderDetection =
       };
     };
 
-const HEADER_KEYWORDS = ['parola', 'unknown', 'traduzione', 'translation', 'traslitterazione', 'transliteration'];
+const HEADER_ALIASES = {
+  unknown: ['parola', 'parola sconosciuta', 'sconosciuta', 'unknown', 'word', 'fremd'],
+  translation: ['traduzione', 'translation', 'meaning', 'bedeutung', 'ubersetzung', 'übersetzung'],
+  transliteration: ['traslitterazione', 'transliteration', 'trascrizione', 'transcription']
+} as const;
 
-const locateIndex = (cells: string[], aliases: string[]) =>
-  cells.findIndex((cell) => aliases.some((alias) => cell.includes(alias)));
+const ALL_HEADER_KEYWORDS = [
+  ...HEADER_ALIASES.unknown,
+  ...HEADER_ALIASES.translation,
+  ...HEADER_ALIASES.transliteration
+];
+
+const normalizeHeaderValue = (value: string) =>
+  value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const matchesAlias = (cell: string, alias: string) => {
+  if (!alias) {
+    return false;
+  }
+
+  const normalizedAlias = normalizeHeaderValue(alias);
+  if (!normalizedAlias) {
+    return false;
+  }
+
+  return cell === normalizedAlias || cell.includes(normalizedAlias) || cell.split(' ').includes(normalizedAlias);
+};
+
+const includesAlias = (cell: string, aliases: readonly string[]) =>
+  aliases.some((alias) => matchesAlias(cell, alias));
+
+const locateIndex = (cells: string[], aliases: readonly string[], fallback: number) => {
+  const index = cells.findIndex((cell) => includesAlias(cell, aliases));
+
+  return index >= 0 ? index : fallback;
+};
 
 export const detectHeaders = (rows: ParsedRows): HeaderDetection => {
   if (!rows.length) {
@@ -25,8 +63,8 @@ export const detectHeaders = (rows: ParsedRows): HeaderDetection => {
   }
 
   const [firstRow] = rows;
-  const normalized = firstRow.map((cell) => String(cell ?? '').toLowerCase());
-  const hasHeader = normalized.some((cell) => HEADER_KEYWORDS.some((keyword) => cell.includes(keyword)));
+  const normalized = firstRow.map((cell) => normalizeHeaderValue(String(cell ?? '')));
+  const hasHeader = normalized.some((cell) => includesAlias(cell, ALL_HEADER_KEYWORDS));
 
   if (!hasHeader) {
     return { hasHeader: false };
@@ -35,9 +73,9 @@ export const detectHeaders = (rows: ParsedRows): HeaderDetection => {
   return {
     hasHeader: true,
     indexes: {
-      unknown: locateIndex(normalized, ['parola', 'unknown']) ?? 0,
-      translation: locateIndex(normalized, ['traduzione', 'translation']) ?? 1,
-      transliteration: locateIndex(normalized, ['traslitterazione', 'transliteration']) ?? 2
+      unknown: locateIndex(normalized, HEADER_ALIASES.unknown, 0),
+      translation: locateIndex(normalized, HEADER_ALIASES.translation, 1),
+      transliteration: locateIndex(normalized, HEADER_ALIASES.transliteration, 2)
     }
   };
 };
@@ -60,6 +98,14 @@ export const rowsToEntries = (rows: ParsedRows): WordEntry[] => {
     const transliteration = transliterationRaw ? String(transliterationRaw ?? '').trim() : undefined;
 
     if (!unknown || !translation) {
+      return accumulator;
+    }
+
+    const looksLikeHeaderRow =
+      includesAlias(normalizeHeaderValue(unknown), HEADER_ALIASES.unknown) &&
+      includesAlias(normalizeHeaderValue(translation), HEADER_ALIASES.translation);
+
+    if (looksLikeHeaderRow) {
       return accumulator;
     }
 
